@@ -1,51 +1,53 @@
-import sys
-import os
 import json
+import os
+import sys
 import traceback
 
 # 使 Python 能找到 tools/ 目录
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 from tools.file_tools import register_file_tools
-from tools.csv_tools import register_csv_tools
 from tools.excel_tools import register_excel_tools
 from tools.invest_tools import register_invest_tools
 
 
 TOOLS = {}
 
+
 def register_tools():
     """收集全部工具"""
     TOOLS.update(register_file_tools())
-    TOOLS.update(register_csv_tools())
     TOOLS.update(register_excel_tools())
     TOOLS.update(register_invest_tools())
 
 
 def main():
     register_tools()
+    print("DEBUG TOOLS:", TOOLS, file=sys.stderr, flush=True)
+
+    tool_schemas = []
+    for name, meta in TOOLS.items():
+        params_schema = {
+            "type": "object",
+            "properties": meta.get("parameters", {}),
+        }
+        if meta.get("required"):
+            params_schema["required"] = meta["required"]
+
+        tool_schemas.append({
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": meta["description"],
+                "parameters": params_schema,
+            }
+        })
 
     # 初始化输出（模型用来识别工具）
     print(json.dumps({
-    "type": "mcp_initialized",
-    "tools": [
-        {
-            "type": "function",
-            "function": {
-                "name": k,
-                "description": v["description"],
-                "parameters": {
-                    "type": "object",
-                    "properties": v["parameters"],
-                    "required": ["path"]
-
-                }
-            }
-        }
-        for k, v in TOOLS.items()
-    ],
-}), flush=True)
-
+        "type": "mcp_initialized",
+        "tools": tool_schemas,
+    }), flush=True)
 
     # 主循环（接受 host 的 JSON 输入）
     for line in sys.stdin:

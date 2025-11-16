@@ -1,14 +1,16 @@
-import subprocess
 import json
+import subprocess
 import threading
+
 from openai import OpenAI
+
 
 # =============================
 # 配置 DeepSeek API
 # =============================
 client = OpenAI(
     api_key="sk-a34b9db0d1de482f941af700ed56b320",
-    base_url="https://api.deepseek.com"
+    base_url="https://api.deepseek.com",
 )
 
 
@@ -25,7 +27,7 @@ def read_stderr(proc):
 # =============================
 def start_server():
     proc = subprocess.Popen(
-        ["python", "-u", "server/mcp_server.py"],
+        [r".\.venv\Scripts\python.exe", "-u", "server/mcp_server.py"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -61,7 +63,7 @@ def main():
     proc = start_server()
 
     # ------------------------
-    # 读取初始化
+    # 读取初始化信息
     # ------------------------
     init_line = proc.stdout.readline().strip()
     if not init_line:
@@ -79,7 +81,13 @@ def main():
     # ------------------------
     # 用户请求
     # ------------------------
-    user_query = "请读取 test.txt 文件内容。"
+    user_query = (
+        "我有一个 Excel 文件 data/portfolio_positions.xlsx，其中 positions 工作表"
+        "包含 symbol/qty/cost，price_map 工作表包含最新 price。"
+        "请先读取 Excel，必要时读取 CSV data/portfolio_positions.csv，"
+        "然后计算每个持仓和整个组合的盈亏、净盈亏百分比，并按多/空拆分。"
+        "最后输出结构化结论和投资建议。"
+    )
 
     print("\n向 DeepSeek 发起第一次调用...")
 

@@ -55,6 +55,7 @@ def register_file_tools():
                 "path": {"type": "string"},
                 "encoding": {"type": "string"},
             },
+            "required": ["path"],
             "callable": read_file,
         },
         "list_files": {
@@ -62,6 +63,7 @@ def register_file_tools():
             "parameters": {
                 "dir": {"type": "string"},
             },
+            "required": ["dir"],
             "callable": list_files,
         },
     }
