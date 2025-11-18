@@ -195,7 +195,11 @@ def run_fallback_mcp(proc: subprocess.Popen, scenario_specs: List[Dict[str, floa
         f"{summarize_scenarios(scenario_payload)}"
     )
     print(fallback_answer)
-    update_report(quality_summary or "暂无模型提示。", scenario_payload)
+    update_report(
+        quality_summary or "暂无模型提示。",
+        scenario_payload,
+        analysis_text=fallback_answer,
+    )
     return quality_summary, scenario_payload
 
 
@@ -218,12 +222,17 @@ def print_tool_list(tools: List[dict]) -> None:
         print(" -", t["function"]["name"])
 
 
-def update_report(quality_text: str, scenario_data: Optional[dict]) -> None:
+def update_report(
+    quality_text: str,
+    scenario_data: Optional[dict],
+    analysis_text: Optional[str] = None,
+) -> None:
     try:
         generate_report(
             output_path=DEFAULT_OUTPUT,
             quality_text=quality_text,
             scenario_data=scenario_data,
+            analysis_text=analysis_text,
         )
     except Exception as exc:
         print(f"生成网页报告失败：{exc}")
@@ -303,7 +312,7 @@ def main():
             final_answer = msg.content or ""
             print(final_answer)
             clean_answer = strip_tool_markup(final_answer)
-            update_report(clean_answer or "暂无模型提示。", None)
+            update_report(clean_answer or "暂无模型提示。", None, analysis_text=clean_answer)
             return
 
         print("\n向 DeepSeek 发起第二次总结调用...")
@@ -316,7 +325,12 @@ def main():
         print("\n最终回答：")
         print(final_answer)
         quality_text = strip_tool_markup(quality_summary or final_answer)
-        update_report(quality_text or "暂无模型提示。", scenario_payload)
+        final_analysis = strip_tool_markup(final_answer)
+        update_report(
+            quality_text or "暂无模型提示。",
+            scenario_payload,
+            analysis_text=final_analysis or quality_text,
+        )
 
     finally:
         proc.terminate()
