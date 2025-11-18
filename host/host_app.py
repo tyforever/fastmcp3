@@ -8,7 +8,11 @@ from typing import Dict, List, Optional
 
 from openai import OpenAI
 
-from portfolio_dashboard import DEFAULT_OUTPUT, generate_report
+from portfolio_dashboard import (
+    DEFAULT_OUTPUT,
+    generate_report,
+    load_positions_and_prices,
+)
 
 
 client = OpenAI(
@@ -111,7 +115,7 @@ def read_stderr(proc: subprocess.Popen) -> None:
 
 def start_server() -> subprocess.Popen:
     proc = subprocess.Popen(
-        [r".\.venv\Scripts\python.exe", "-u", "server/mcp_server.py"],
+        [sys.executable, "-u", "server/mcp_server.py"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -121,6 +125,78 @@ def start_server() -> subprocess.Popen:
     )
     threading.Thread(target=read_stderr, args=(proc,), daemon=True).start()
     return proc
+
+
+def build_tool_payload() -> tuple[List[dict], Dict[str, float]]:
+    positions_df, price_df = load_positions_and_prices()
+    rows = positions_df.to_dict(orient="records")
+    price_map: Dict[str, float] = {}
+    for _, row in price_df.iterrows():
+        value = row.get("price")
+        if value is None or value != value:  # skip None/NaN
+            continue
+        price_map[str(row["symbol"]).upper()] = float(value)
+    return rows, price_map
+
+
+def format_quality_summary(result_payload: dict) -> str:
+    quality_summary = None
+    if isinstance(result_payload, dict):
+        quality_summary = result_payload.get("summary")
+        if not quality_summary:
+            warnings = result_payload.get("warnings") or []
+            if warnings:
+                quality_summary = "；".join(warnings)
+    return quality_summary or json.dumps(result_payload, ensure_ascii=False)
+
+
+def summarize_scenarios(payload: Optional[dict]) -> str:
+    if not payload:
+        return "暂无情景结果。"
+
+    lines = ["情景对比："]
+    scenarios = payload.get("scenarios") or []
+    for item in scenarios:
+        totals = item.get("totals") or {}
+        label = item.get("label")
+        pnl = totals.get("pnl")
+        pnl_pct = totals.get("pnl_pct")
+        lines.append(
+            f"- {label}: 净盈亏 {pnl:.2f}，净盈亏% {pnl_pct:.2%}" if pnl is not None else f"- {label}: 未能计算结果"
+        )
+    return "\n".join(lines)
+
+
+def run_fallback_mcp(proc: subprocess.Popen, scenario_specs: List[Dict[str, float]]):
+    print("\n模型未触发 MCP 工具，主动调用关键工具以突出 MCP 作用…")
+    try:
+        rows, price_map = build_tool_payload()
+    except Exception as exc:
+        print(f"准备组合数据失败：{exc}")
+        return None, None
+
+    quality_result = call_tool(proc, "analyze_portfolio_quality", {"rows": rows, "price_map": price_map})
+    quality_payload = quality_result.get("result", quality_result)
+    quality_summary = format_quality_summary(quality_payload)
+
+    adjustments = scenario_specs or [
+        {"label": "-5%", "pct": -0.05, "delta": 0.0},
+        {"label": "+5%", "pct": 0.05, "delta": 0.0},
+    ]
+    scenario_result = call_tool(
+        proc,
+        "simulate_scenarios",
+        {"rows": rows, "price_map": price_map, "adjustments": adjustments},
+    )
+    scenario_payload = scenario_result.get("result", scenario_result)
+
+    fallback_answer = (
+        f"数据质量与风险提示：\n{quality_summary}\n\n"
+        f"{summarize_scenarios(scenario_payload)}"
+    )
+    print(fallback_answer)
+    update_report(quality_summary or "暂无模型提示。", scenario_payload)
+    return quality_summary, scenario_payload
 
 
 def call_tool(proc: subprocess.Popen, name: str, args: dict) -> dict:
@@ -211,14 +287,7 @@ def main():
             if tool_name == "simulate_scenarios":
                 scenario_payload = result_payload
             if tool_name == "analyze_portfolio_quality":
-                quality_summary = None
-                if isinstance(result_payload, dict):
-                    quality_summary = result_payload.get("summary")
-                    if not quality_summary:
-                        warnings = result_payload.get("warnings") or []
-                        if warnings:
-                            quality_summary = "；".join(warnings)
-                quality_summary = quality_summary or json.dumps(result_payload, ensure_ascii=False)
+                quality_summary = format_quality_summary(result_payload)
 
             tool_messages.append({
                 "role": "tool",
@@ -227,7 +296,10 @@ def main():
             })
 
         if not tool_messages:
-            print("\n模型未调用任何工具：")
+            quality_summary, scenario_payload = run_fallback_mcp(proc, scenario_specs)
+            if quality_summary is not None:
+                return
+            print("\n模型未调用任何工具且备选方案失败。")
             final_answer = msg.content or ""
             print(final_answer)
             clean_answer = strip_tool_markup(final_answer)
