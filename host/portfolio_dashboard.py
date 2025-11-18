@@ -187,8 +187,12 @@ def build_scenario_rows(scenario_data: Optional[dict]) -> str:
     """
 
 
-def build_html(metrics: dict, quality_text: Optional[str] = None,
-               scenario_data: Optional[dict] = None) -> str:
+def build_html(
+    metrics: dict,
+    quality_text: Optional[str] = None,
+    scenario_data: Optional[dict] = None,
+    analysis_text: Optional[str] = None,
+) -> str:
     totals = metrics["totals"]
     summary_cards = [
         ("总市值", format_currency(totals["market_value"])),
@@ -204,7 +208,9 @@ def build_html(metrics: dict, quality_text: Optional[str] = None,
     df = metrics["portfolio"]
     updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     quality_notes = (quality_text or "暂无模型提示。").strip()
+    analysis_notes = (analysis_text or "暂无模型分析，请在 host_app 中触发模型调用。").strip()
     quality_html = "<br />".join(line or "&nbsp;" for line in quality_notes.splitlines())
+    analysis_html = "<br />".join(line or "&nbsp;" for line in analysis_notes.splitlines())
 
     def pnl_class(value: float) -> str:
         if value > 0:
@@ -356,6 +362,10 @@ def build_html(metrics: dict, quality_text: Optional[str] = None,
             {''.join(f'<div class="card"><h3>{title}</h3><p>{value}</p></div>' for title, value in summary_cards)}
         </section>
         <section class="quality-section">
+            <h2 class="section-title">AI 分析与投资建议</h2>
+            <div class="quality-box">{analysis_html}</div>
+        </section>
+        <section class="quality-section">
             <h2 class="section-title">数据质量与风险提示</h2>
             <div class="quality-box">{quality_html}</div>
         </section>
@@ -408,11 +418,21 @@ def build_html(metrics: dict, quality_text: Optional[str] = None,
     return html
 
 
-def generate_report(output_path: Path = DEFAULT_OUTPUT, quality_text: Optional[str] = None,
-                    scenario_data: Optional[dict] = None, open_browser: bool = False) -> Path:
+def generate_report(
+    output_path: Path = DEFAULT_OUTPUT,
+    quality_text: Optional[str] = None,
+    scenario_data: Optional[dict] = None,
+    analysis_text: Optional[str] = None,
+    open_browser: bool = False,
+) -> Path:
     portfolio_df, _ = load_positions_and_prices()
     metrics = compute_metrics(portfolio_df)
-    html = build_html(metrics, quality_text=quality_text, scenario_data=scenario_data)
+    html = build_html(
+        metrics,
+        quality_text=quality_text,
+        scenario_data=scenario_data,
+        analysis_text=analysis_text,
+    )
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(html, encoding="utf-8")
