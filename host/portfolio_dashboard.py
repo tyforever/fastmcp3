@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 from datetime import datetime
 from pathlib import Path
-from typing import Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import webbrowser
 
 import pandas as pd
@@ -47,11 +48,11 @@ def load_positions_and_prices() -> Tuple[pd.DataFrame, pd.DataFrame]:
         price_df[["symbol", "price"]],
         on="symbol",
         how="left",
-        suffixes=("", "_from_price_map"),
+        suffixes=("", "_map"),
     )
-    if "price_from_price_map" in merged.columns:
-        merged["price"] = merged["price"].fillna(merged["price_from_price_map"])
-        merged = merged.drop(columns=["price_from_price_map"])
+    if "price_map" in merged.columns:
+        merged["price"] = merged["price"].fillna(merged["price_map"])
+        merged = merged.drop(columns=["price_map"])
 
     if merged["price"].isna().any():
         missing = merged.loc[merged["price"].isna(), "symbol"].tolist()
@@ -82,9 +83,6 @@ def compute_metrics(portfolio_df: pd.DataFrame) -> dict:
     totals["pnl"] = totals["market_value"] - totals["cost_value"]
     totals["pnl_pct"] = (totals["pnl"] / abs(totals["cost_value"])) * 100 if totals["cost_value"] else 0.0
 
-    long_df = df[df["position_type"] == "多头"]
-    short_df = df[df["position_type"] == "空头"]
-
     def summarize(section: pd.DataFrame) -> dict:
         if section.empty:
             return {"market_value": 0.0, "cost_value": 0.0, "pnl": 0.0, "pnl_pct": 0.0}
@@ -102,8 +100,8 @@ def compute_metrics(portfolio_df: pd.DataFrame) -> dict:
     return {
         "portfolio": df,
         "totals": totals,
-        "longs": summarize(long_df),
-        "shorts": summarize(short_df),
+        "longs": summarize(df[df["position_type"] == "多头"]),
+        "shorts": summarize(df[df["position_type"] == "空头"]),
     }
 
 
@@ -115,7 +113,82 @@ def format_pct(value: float) -> str:
     return f"{value:+.2f}%"
 
 
-def build_html(metrics: dict) -> str:
+def format_shift(pct: float, delta: float) -> str:
+    pct_part = f"{pct * 100:+.1f}%" if pct else ""
+    delta_part = f"{delta:+.2f}" if delta else ""
+    if pct_part and delta_part:
+        return f"{pct_part} / {delta_part}"
+    return pct_part or delta_part or "0%"
+
+
+def build_scenario_rows(scenario_data: Optional[dict]) -> str:
+    if not scenario_data:
+        return "<p>暂无情景结果，可通过 CLI 指定 --scenario 后由模型更新。</p>"
+
+    scenarios = scenario_data.get("scenarios") or []
+    if not scenarios:
+        return "<p>暂无情景结果，可通过 CLI 指定 --scenario 后由模型更新。</p>"
+
+    rows = []
+    base_totals = scenario_data.get("base_totals") or {}
+    for item in scenarios:
+        totals = item.get("totals") or {}
+        pnl = totals.get("pnl")
+        pnl_pct = totals.get("pnl_pct")
+        rows.append(f"""
+            <tr>
+                <td>{item.get('label')}</td>
+                <td>{format_shift(item.get('pct', 0.0), item.get('delta', 0.0))}</td>
+                <td>{format_currency(totals.get('market_value', 0.0)) if totals else '-'}</td>
+                <td>{format_currency(totals.get('cost_value', 0.0)) if totals else '-'}</td>
+                <td class="{ 'positive' if (pnl or 0) > 0 else 'negative' if (pnl or 0) < 0 else '' }">
+                    {format_currency(pnl) if pnl is not None else '-'}
+                </td>
+                <td class="{ 'positive' if (pnl or 0) > 0 else 'negative' if (pnl or 0) < 0 else '' }">
+                    {format_pct(pnl_pct) if pnl_pct is not None else '-'}
+                </td>
+            </tr>
+        """)
+
+    base_row = ""
+    if base_totals:
+        base_row = f"""
+            <tr class="scenario-base">
+                <td>当前价格</td>
+                <td>基准</td>
+                <td>{format_currency(base_totals.get('market_value', 0.0))}</td>
+                <td>{format_currency(base_totals.get('cost_value', 0.0))}</td>
+                <td class="{ 'positive' if base_totals.get('pnl', 0.0) > 0 else 'negative' if base_totals.get('pnl', 0.0) < 0 else '' }">
+                    {format_currency(base_totals.get('pnl', 0.0))}
+                </td>
+                <td class="{ 'positive' if base_totals.get('pnl', 0.0) > 0 else 'negative' if base_totals.get('pnl', 0.0) < 0 else '' }">
+                    {format_pct(base_totals.get('pnl_pct', 0.0))}
+                </td>
+            </tr>
+        """
+
+    return f"""
+        <table class="scenario-table">
+            <thead>
+                <tr>
+                    <th>情景</th>
+                    <th>调整幅度</th>
+                    <th>市值</th>
+                    <th>成本</th>
+                    <th>净盈亏</th>
+                    <th>净盈亏%</th>
+                </tr>
+            </thead>
+            <tbody>
+                {base_row}
+                {''.join(rows)}
+            </tbody>
+        </table>
+    """
+
+
+def build_html(metrics: dict, quality_text: Optional[str] = None,
+               scenario_data: Optional[dict] = None) -> str:
     totals = metrics["totals"]
     summary_cards = [
         ("总市值", format_currency(totals["market_value"])),
@@ -130,6 +203,8 @@ def build_html(metrics: dict) -> str:
     ]
     df = metrics["portfolio"]
     updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    quality_notes = (quality_text or "暂无模型提示。").strip()
+    quality_html = "<br />".join(line or "&nbsp;" for line in quality_notes.splitlines())
 
     def pnl_class(value: float) -> str:
         if value > 0:
@@ -156,16 +231,18 @@ def build_html(metrics: dict) -> str:
 
     bucket_table_rows = "".join(
         f"""
-                    <tr>
-                        <td style="text-align:center">{label}</td>
-                        <td>{format_currency(bucket['market_value'])}</td>
-                        <td>{format_currency(bucket['cost_value'])}</td>
-                        <td class="{pnl_class(bucket['pnl'])}">{format_currency(bucket['pnl'])}</td>
-                        <td class="{pnl_class(bucket['pnl'])}">{format_pct(bucket['pnl_pct'])}</td>
-                    </tr>
+            <tr>
+                <td style="text-align:center">{label}</td>
+                <td>{format_currency(bucket['market_value'])}</td>
+                <td>{format_currency(bucket['cost_value'])}</td>
+                <td class="{pnl_class(bucket['pnl'])}">{format_currency(bucket['pnl'])}</td>
+                <td class="{pnl_class(bucket['pnl'])}">{format_pct(bucket['pnl_pct'])}</td>
+            </tr>
         """
         for label, bucket in bucket_rows
     )
+
+    scenario_section = build_scenario_rows(scenario_data)
 
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -252,6 +329,21 @@ def build_html(metrics: dict) -> str:
             font-size: 0.9rem;
             color: #9ca3af;
         }}
+        .quality-box {{
+            background: #fff7ed;
+            border: 1px solid #fed7aa;
+            color: #9a3412;
+            padding: 16px;
+            border-radius: 12px;
+            line-height: 1.6;
+            margin-top: 12px;
+        }}
+        .scenario-table th {{
+            background: #0f172a;
+        }}
+        .scenario-base {{
+            background: #ecfccb;
+        }}
     </style>
 </head>
 <body>
@@ -262,6 +354,14 @@ def build_html(metrics: dict) -> str:
     <main>
         <section class="cards">
             {''.join(f'<div class="card"><h3>{title}</h3><p>{value}</p></div>' for title, value in summary_cards)}
+        </section>
+        <section class="quality-section">
+            <h2 class="section-title">数据质量与风险提示</h2>
+            <div class="quality-box">{quality_html}</div>
+        </section>
+        <section class="scenario-section">
+            <h2 class="section-title">情景对比</h2>
+            {scenario_section}
         </section>
         <section>
             <h2 class="section-title">多空持仓汇总</h2>
@@ -308,23 +408,43 @@ def build_html(metrics: dict) -> str:
     return html
 
 
+def generate_report(output_path: Path = DEFAULT_OUTPUT, quality_text: Optional[str] = None,
+                    scenario_data: Optional[dict] = None, open_browser: bool = False) -> Path:
+    portfolio_df, _ = load_positions_and_prices()
+    metrics = compute_metrics(portfolio_df)
+    html = build_html(metrics, quality_text=quality_text, scenario_data=scenario_data)
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(html, encoding="utf-8")
+    print(f"报告已生成: {output_path.resolve()}")
+    if open_browser:
+        webbrowser.open(output_path.resolve().as_uri())
+    return output_path
+
+
 def main():
     parser = argparse.ArgumentParser(description="生成组合盈亏的网页报告")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT, help="HTML 报告输出路径")
     parser.add_argument("--open", action="store_true", help="生成后在默认浏览器中打开")
+    parser.add_argument("--quality-text", help="直接传入数据质量与风险提示内容")
+    parser.add_argument("--quality-file", type=Path, help="从文件读取数据质量提示内容")
+    parser.add_argument("--scenario-file", type=Path, help="从 JSON 文件读取情景模拟结果")
     args = parser.parse_args()
 
-    portfolio_df, _ = load_positions_and_prices()
-    metrics = compute_metrics(portfolio_df)
+    quality_text = args.quality_text
+    if quality_text is None and args.quality_file:
+        quality_text = args.quality_file.read_text(encoding="utf-8")
 
-    html = build_html(metrics)
-    output_path = args.output
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(html, encoding="utf-8")
-    print(f"报告已生成: {output_path.resolve()}")
+    scenario_data: Optional[dict] = None
+    if args.scenario_file and args.scenario_file.exists():
+        scenario_data = json.loads(args.scenario_file.read_text(encoding="utf-8"))
 
-    if args.open:
-        webbrowser.open(output_path.resolve().as_uri())
+    generate_report(
+        output_path=args.output,
+        quality_text=quality_text,
+        scenario_data=scenario_data,
+        open_browser=args.open,
+    )
 
 
 if __name__ == "__main__":

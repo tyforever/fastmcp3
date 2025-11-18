@@ -1,31 +1,115 @@
+import argparse
 import json
+import re
 import subprocess
+import sys
 import threading
+from typing import Dict, List, Optional
 
 from openai import OpenAI
 
+from portfolio_dashboard import DEFAULT_OUTPUT, generate_report
 
-# =============================
-# 配置 DeepSeek API
-# =============================
+
 client = OpenAI(
     api_key="sk-a34b9db0d1de482f941af700ed56b320",
     base_url="https://api.deepseek.com",
 )
 
 
-# =============================
-# 打印 server 的 stderr（调试）
-# =============================
-def read_stderr(proc):
+SYSTEM_PROMPT = (
+    "你是一名投研分析助手。"
+    "每次沟通都要："
+    "1) 主动调用 analyze_portfolio_quality 等校验工具，确认数据质量；"
+    "2) 如果用户提供情景参数，则调用 simulate_scenarios 生成对应情景结果；"
+    "3) 第二轮回答时，对比不同情景的风险收益拐点并输出投资建议。"
+)
+
+DEFAULT_USER_PROMPT = (
+    "我正在复盘 data/portfolio_positions.xlsx 中的持仓表现，"
+    "请你自主决定需要读取的内容、校验方式与建议要点。"
+)
+
+
+TOOL_BLOCK_PATTERN = re.compile(r"<｜tool.*?begin｜>.*?<｜tool.*?end｜>", re.DOTALL)
+TOOL_TAG_PATTERN = re.compile(r"<｜tool.*?｜>")
+
+
+def normalize_cli_tokens(argv: List[str]) -> List[str]:
+    normalized: List[str] = []
+    i = 0
+    while i < len(argv):
+        token = argv[i]
+        if token in ("-s", "--scenario"):
+            if i + 1 >= len(argv):
+                normalized.append(token)
+            else:
+                value = argv[i + 1]
+                normalized.append(f"--scenario={value}")
+                i += 1
+        else:
+            normalized.append(token)
+        i += 1
+    return normalized
+
+
+def parse_cli_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="MCP Host CLI")
+    parser.add_argument(
+        "-s",
+        "--scenario",
+        action="append",
+        dest="scenario_values",
+        help="情景价格调整，例如 -5%%, 0%%, +5%% 表示百分比，或 2 表示绝对价格 +2",
+    )
+    normalized = normalize_cli_tokens(sys.argv[1:])
+    return parser.parse_args(normalized)
+
+
+def parse_scenario_specs(values: Optional[List[str]]) -> List[Dict[str, float]]:
+    specs: List[Dict[str, float]] = []
+    if not values:
+        return specs
+
+    for raw in values:
+        token = raw.strip()
+        if not token:
+            continue
+        label = token
+        pct = 0.0
+        delta = 0.0
+        if token.endswith("%"):
+            pct = float(token.rstrip("%")) / 100.0
+        else:
+            delta = float(token)
+        specs.append({"label": label, "pct": pct, "delta": delta})
+    return specs
+
+
+def format_scenario_instruction(specs: List[Dict[str, float]]) -> str:
+    labels = ", ".join(spec["label"] for spec in specs)
+    return (
+        f"情景参数：{labels}。"
+        "请在调用 simulate_scenarios 工具时将这些调整注入 adjustments 字段，"
+        "百分比代表基于当前价格的涨跌，纯数字代表绝对价格调整。"
+    )
+
+
+def prompt_user_query() -> str:
+    try:
+        user_text = input("请输入你想了解的组合问题（直接回车使用默认）：").strip()
+    except EOFError:
+        user_text = ""
+
+    return user_text or DEFAULT_USER_PROMPT
+
+
+def read_stderr(proc: subprocess.Popen) -> None:
     for line in proc.stderr:
         print("SERVER STDERR:", line.strip())
 
 
-# =============================
-# 启动 MCP Server
-# =============================
-def start_server():
+def start_server() -> subprocess.Popen:
     proc = subprocess.Popen(
         [r".\.venv\Scripts\python.exe", "-u", "server/mcp_server.py"],
         stdin=subprocess.PIPE,
@@ -39,10 +123,7 @@ def start_server():
     return proc
 
 
-# =============================
-# 调用本地工具
-# =============================
-def call_tool(proc, name, args):
+def call_tool(proc: subprocess.Popen, name: str, args: dict) -> dict:
     req = {
         "type": "tool",
         "name": name,
@@ -55,97 +136,119 @@ def call_tool(proc, name, args):
     return json.loads(line)
 
 
-# =============================
-# 主流程
-# =============================
-def main():
-    print("启动 MCP Server ...")
-    proc = start_server()
-
-    # ------------------------
-    # 读取初始化信息
-    # ------------------------
-    init_line = proc.stdout.readline().strip()
-    if not init_line:
-        print("Server 没有输出初始化信息")
-        proc.terminate()
-        return
-
-    init = json.loads(init_line)
-    tools = init["tools"]
-
+def print_tool_list(tools: List[dict]) -> None:
     print("Server Tools Loaded:")
     for t in tools:
         print(" -", t["function"]["name"])
 
-    # ------------------------
-    # 用户请求
-    # ------------------------
-    user_query = (
-        "我有一个 Excel 文件 data/portfolio_positions.xlsx，其中 positions 工作表"
-        "包含 symbol/qty/cost，price_map 工作表包含最新 price。"
-        "请先读取 Excel，必要时读取 CSV data/portfolio_positions.csv，"
-        "然后计算每个持仓和整个组合的盈亏、净盈亏百分比，并按多/空拆分。"
-        "最后输出结构化结论和投资建议。"
-    )
 
-    print("\n向 DeepSeek 发起第一次调用...")
+def update_report(quality_text: str, scenario_data: Optional[dict]) -> None:
+    try:
+        generate_report(
+            output_path=DEFAULT_OUTPUT,
+            quality_text=quality_text,
+            scenario_data=scenario_data,
+        )
+    except Exception as exc:
+        print(f"生成网页报告失败：{exc}")
 
-    # ------------------------
-    # 第一次模型调用（模型选择工具）
-    # ------------------------
-    resp1 = client.chat.completions.create(
-        model="deepseek-chat",
-        messages=[{"role": "user", "content": user_query}],
-        tools=tools,
-    )
 
-    msg = resp1.choices[0].message
-    tool_calls = msg.tool_calls
+def strip_tool_markup(text: str) -> str:
+    if not text:
+        return ""
+    cleaned = TOOL_BLOCK_PATTERN.sub("", text)
+    cleaned = TOOL_TAG_PATTERN.sub("", cleaned)
+    cleaned = cleaned.replace("▁", " ")
+    return cleaned.strip()
 
-    # ------------------------
-    # 模型决定调用工具
-    # ------------------------
-    if tool_calls:
-        call = tool_calls[0]
 
-        tool_name = call.function.name
-        args = json.loads(call.function.arguments)
-        tool_call_id = call.id
+def main():
+    args = parse_cli_args()
+    scenario_specs = parse_scenario_specs(args.scenario_values)
+    user_query = prompt_user_query()
+    if scenario_specs:
+        user_query = f"{user_query}\n\n{format_scenario_instruction(scenario_specs)}"
 
-        print(f"\n模型决定调用工具：{tool_name}({args})")
+    print("启动 MCP Server ...")
+    proc = start_server()
 
-        # 执行工具
-        tool_result = call_tool(proc, tool_name, args)
+    try:
+        init_line = proc.stdout.readline().strip()
+        if not init_line:
+            print("Server 没有输出初始化信息")
+            return
 
-        print("工具执行成功，结果：", tool_result)
+        init = json.loads(init_line)
+        tools = init["tools"]
+        print_tool_list(tools)
 
-        print("\n向 DeepSeek 发起第二次总结调用...")
+        base_messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_query},
+        ]
 
-        # 第二次调用模型（总结）
-        resp2 = client.chat.completions.create(
+        print("\n向 DeepSeek 发起第一次调用（工具选择）...")
+        resp1 = client.chat.completions.create(
             model="deepseek-chat",
-            messages=[
-                {"role": "user", "content": user_query},
-                msg,
-                {
-                    "role": "tool",
-                    "tool_call_id": tool_call_id,
-                    "content": json.dumps(tool_result, ensure_ascii=False),
-                },
-            ],
+            messages=base_messages,
+            tools=tools,
         )
 
+        msg = resp1.choices[0].message
+        tool_calls = msg.tool_calls or []
+        tool_messages = []
+        scenario_payload = None
+        quality_summary = None
+
+        for call in tool_calls:
+            tool_name = call.function.name
+            args_dict = json.loads(call.function.arguments)
+            print(f"\n模型决定调用工具：{tool_name}({args_dict})")
+            tool_result = call_tool(proc, tool_name, args_dict)
+            print("工具执行成功，结果：", tool_result)
+            result_payload = tool_result.get("result", tool_result)
+
+            if tool_name == "simulate_scenarios":
+                scenario_payload = result_payload
+            if tool_name == "analyze_portfolio_quality":
+                quality_summary = None
+                if isinstance(result_payload, dict):
+                    quality_summary = result_payload.get("summary")
+                    if not quality_summary:
+                        warnings = result_payload.get("warnings") or []
+                        if warnings:
+                            quality_summary = "；".join(warnings)
+                quality_summary = quality_summary or json.dumps(result_payload, ensure_ascii=False)
+
+            tool_messages.append({
+                "role": "tool",
+                "tool_call_id": call.id,
+                "content": json.dumps(result_payload, ensure_ascii=False),
+            })
+
+        if not tool_messages:
+            print("\n模型未调用任何工具：")
+            final_answer = msg.content or ""
+            print(final_answer)
+            clean_answer = strip_tool_markup(final_answer)
+            update_report(clean_answer or "暂无模型提示。", None)
+            return
+
+        print("\n向 DeepSeek 发起第二次总结调用...")
+        second_messages = base_messages + [msg] + tool_messages
+        resp2 = client.chat.completions.create(
+            model="deepseek-chat",
+            messages=second_messages,
+        )
+        final_answer = resp2.choices[0].message.content or ""
         print("\n最终回答：")
-        print(resp2.choices[0].message.content)
+        print(final_answer)
+        quality_text = strip_tool_markup(quality_summary or final_answer)
+        update_report(quality_text or "暂无模型提示。", scenario_payload)
 
-    else:
-        print("\n模型未调用任何工具：")
-        print(msg.content)
-
-    proc.terminate()
+    finally:
+        proc.terminate()
 
 
-# =============================
 if __name__ == "__main__":
     main()
