@@ -105,6 +105,75 @@ def compute_metrics(portfolio_df: pd.DataFrame) -> dict:
     }
 
 
+def _describe_top_positions(df: pd.DataFrame, n: int = 2) -> str:
+    if df.empty:
+        return "暂无持仓"
+
+    winners = df.nlargest(n, "pnl")
+    losers = df.nsmallest(n, "pnl")
+
+    parts = []
+    if not winners.empty:
+        win_desc = "；".join(
+            f"{row['symbol']} 盈亏 {row['pnl']:.2f}({row['pnl_pct']:+.2f}%)"
+            for _, row in winners.iterrows()
+        )
+        parts.append(f"领先标的：{win_desc}")
+
+    if not losers.empty:
+        lose_desc = "；".join(
+            f"{row['symbol']} 盈亏 {row['pnl']:.2f}({row['pnl_pct']:+.2f}%)"
+            for _, row in losers.iterrows()
+        )
+        parts.append(f"拖累标的：{lose_desc}")
+
+    return "；".join(parts)
+
+
+def build_fallback_analysis(metrics: dict, scenario_data: Optional[dict]) -> str:
+    df: pd.DataFrame = metrics["portfolio"]
+    totals = metrics["totals"]
+    longs = metrics["longs"]
+    shorts = metrics["shorts"]
+
+    total_market = totals.get("market_value", 0.0)
+    long_mv = longs.get("market_value", 0.0)
+    short_mv = shorts.get("market_value", 0.0)
+    long_share = f"{long_mv / total_market:.1%}" if total_market else "0%"
+    short_share = f"{short_mv / total_market:.1%}" if total_market else "0%"
+
+    lines = [
+        f"组合市值 {totals.get('market_value', 0.0):,.2f}，净盈亏 {totals.get('pnl', 0.0):,.2f} ({totals.get('pnl_pct', 0.0):+.2f}%)。",
+        f"多头市值占比 {long_share}，空头市值占比 {short_share}。",
+        _describe_top_positions(df),
+    ]
+
+    scenarios = (scenario_data or {}).get("scenarios") or []
+    if scenarios:
+        ranked = sorted(
+            scenarios,
+            key=lambda item: (item.get("totals") or {}).get("pnl", float("-inf")),
+            reverse=True,
+        )
+        best = ranked[0]
+        worst = ranked[-1]
+        base_totals = (scenario_data or {}).get("base") or {}
+        base_pnl = base_totals.get("pnl")
+
+        def _fmt(item: dict) -> str:
+            totals = item.get("totals") or {}
+            return f"{item.get('label')}: 净盈亏 {totals.get('pnl', 0.0):,.2f} ({totals.get('pnl_pct', 0.0):+.2f}%)"
+
+        scenario_lines = ["情景模拟摘要：", _fmt(best)]
+        if best is not worst:
+            scenario_lines.append(_fmt(worst))
+        if base_pnl is not None:
+            scenario_lines.append(f"当前价格基准盈亏 {base_pnl:,.2f}。")
+        lines.append(" ".join(scenario_lines))
+
+    return "\n".join(line for line in lines if line)
+
+
 def format_currency(value: float) -> str:
     return f"{value:,.2f}"
 
