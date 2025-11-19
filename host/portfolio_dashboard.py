@@ -105,6 +105,75 @@ def compute_metrics(portfolio_df: pd.DataFrame) -> dict:
     }
 
 
+def _describe_top_positions(df: pd.DataFrame, n: int = 2) -> str:
+    if df.empty:
+        return "暂无持仓"
+
+    winners = df.nlargest(n, "pnl")
+    losers = df.nsmallest(n, "pnl")
+
+    parts = []
+    if not winners.empty:
+        win_desc = "；".join(
+            f"{row['symbol']} 盈亏 {row['pnl']:.2f}({row['pnl_pct']:+.2f}%)"
+            for _, row in winners.iterrows()
+        )
+        parts.append(f"领先标的：{win_desc}")
+
+    if not losers.empty:
+        lose_desc = "；".join(
+            f"{row['symbol']} 盈亏 {row['pnl']:.2f}({row['pnl_pct']:+.2f}%)"
+            for _, row in losers.iterrows()
+        )
+        parts.append(f"拖累标的：{lose_desc}")
+
+    return "；".join(parts)
+
+
+def build_fallback_analysis(metrics: dict, scenario_data: Optional[dict]) -> str:
+    df: pd.DataFrame = metrics["portfolio"]
+    totals = metrics["totals"]
+    longs = metrics["longs"]
+    shorts = metrics["shorts"]
+
+    total_market = totals.get("market_value", 0.0)
+    long_mv = longs.get("market_value", 0.0)
+    short_mv = shorts.get("market_value", 0.0)
+    long_share = f"{long_mv / total_market:.1%}" if total_market else "0%"
+    short_share = f"{short_mv / total_market:.1%}" if total_market else "0%"
+
+    lines = [
+        f"组合市值 {totals.get('market_value', 0.0):,.2f}，净盈亏 {totals.get('pnl', 0.0):,.2f} ({totals.get('pnl_pct', 0.0):+.2f}%)。",
+        f"多头市值占比 {long_share}，空头市值占比 {short_share}。",
+        _describe_top_positions(df),
+    ]
+
+    scenarios = (scenario_data or {}).get("scenarios") or []
+    if scenarios:
+        ranked = sorted(
+            scenarios,
+            key=lambda item: (item.get("totals") or {}).get("pnl", float("-inf")),
+            reverse=True,
+        )
+        best = ranked[0]
+        worst = ranked[-1]
+        base_totals = (scenario_data or {}).get("base") or {}
+        base_pnl = base_totals.get("pnl")
+
+        def _fmt(item: dict) -> str:
+            totals = item.get("totals") or {}
+            return f"{item.get('label')}: 净盈亏 {totals.get('pnl', 0.0):,.2f} ({totals.get('pnl_pct', 0.0):+.2f}%)"
+
+        scenario_lines = ["情景模拟摘要：", _fmt(best)]
+        if best is not worst:
+            scenario_lines.append(_fmt(worst))
+        if base_pnl is not None:
+            scenario_lines.append(f"当前价格基准盈亏 {base_pnl:,.2f}。")
+        lines.append(" ".join(scenario_lines))
+
+    return "\n".join(line for line in lines if line)
+
+
 def format_currency(value: float) -> str:
     return f"{value:,.2f}"
 
@@ -187,8 +256,12 @@ def build_scenario_rows(scenario_data: Optional[dict]) -> str:
     """
 
 
-def build_html(metrics: dict, quality_text: Optional[str] = None,
-               scenario_data: Optional[dict] = None) -> str:
+def build_html(
+    metrics: dict,
+    quality_text: Optional[str] = None,
+    scenario_data: Optional[dict] = None,
+    analysis_text: Optional[str] = None,
+) -> str:
     totals = metrics["totals"]
     summary_cards = [
         ("总市值", format_currency(totals["market_value"])),
@@ -204,7 +277,9 @@ def build_html(metrics: dict, quality_text: Optional[str] = None,
     df = metrics["portfolio"]
     updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     quality_notes = (quality_text or "暂无模型提示。").strip()
+    analysis_notes = (analysis_text or "暂无模型分析，请在 host_app 中触发模型调用。").strip()
     quality_html = "<br />".join(line or "&nbsp;" for line in quality_notes.splitlines())
+    analysis_html = "<br />".join(line or "&nbsp;" for line in analysis_notes.splitlines())
 
     def pnl_class(value: float) -> str:
         if value > 0:
@@ -356,6 +431,10 @@ def build_html(metrics: dict, quality_text: Optional[str] = None,
             {''.join(f'<div class="card"><h3>{title}</h3><p>{value}</p></div>' for title, value in summary_cards)}
         </section>
         <section class="quality-section">
+            <h2 class="section-title">AI 分析与投资建议</h2>
+            <div class="quality-box">{analysis_html}</div>
+        </section>
+        <section class="quality-section">
             <h2 class="section-title">数据质量与风险提示</h2>
             <div class="quality-box">{quality_html}</div>
         </section>
@@ -408,11 +487,24 @@ def build_html(metrics: dict, quality_text: Optional[str] = None,
     return html
 
 
-def generate_report(output_path: Path = DEFAULT_OUTPUT, quality_text: Optional[str] = None,
-                    scenario_data: Optional[dict] = None, open_browser: bool = False) -> Path:
+def generate_report(
+    output_path: Path = DEFAULT_OUTPUT,
+    quality_text: Optional[str] = None,
+    scenario_data: Optional[dict] = None,
+    analysis_text: Optional[str] = None,
+    open_browser: bool = False,
+) -> Path:
     portfolio_df, _ = load_positions_and_prices()
     metrics = compute_metrics(portfolio_df)
-    html = build_html(metrics, quality_text=quality_text, scenario_data=scenario_data)
+    analysis_text = (analysis_text or "").strip()
+    if not analysis_text:
+        analysis_text = build_fallback_analysis(metrics, scenario_data)
+    html = build_html(
+        metrics,
+        quality_text=quality_text,
+        scenario_data=scenario_data,
+        analysis_text=analysis_text,
+    )
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(html, encoding="utf-8")
