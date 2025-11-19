@@ -69,7 +69,6 @@ python host/portfolio_dashboard.py --output reports/latest.html --open
    - 启动 `server/mcp_server.py` 并输出可用工具列表；
    - 调用 DeepSeek 进行两轮对话（第一轮挑工具，第二轮汇总分析）；
    - 将模型返回的“数据质量提示 + 情景分析 + 投资建议”写入 `reports/portfolio_report.html`。
-   - **若模型忘记调用关键工具**（仅读表或没有生成情景），脚本会自动补齐 `analyze_portfolio_quality` 与 `simulate_scenarios` 的结果，确保报告不再出现“暂无建议/暂无情景”。
 4. 运行完成后，直接用浏览器打开 `reports/portfolio_report.html` 即可查看最新报告。若你同时使用 `--analysis-text/--analysis-file` 的 CLI 流程，这两个方式会共享同一份 HTML 文件，随时可以覆盖更新。
 
 因此：
