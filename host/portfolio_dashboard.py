@@ -496,9 +496,6 @@ def generate_report(
 ) -> Path:
     portfolio_df, _ = load_positions_and_prices()
     metrics = compute_metrics(portfolio_df)
-    analysis_text = (analysis_text or "").strip()
-    if not analysis_text:
-        analysis_text = build_fallback_analysis(metrics, scenario_data)
     html = build_html(
         metrics,
         quality_text=quality_text,
