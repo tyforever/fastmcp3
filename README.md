@@ -55,3 +55,24 @@ python host/portfolio_dashboard.py --output reports/latest.html --open
   ```
 
 将上述参数自由组合即可生成带有 AI 建议的完整报告。若未提供 AI 文本，程序会根据持仓胜负、净值与情景模拟自动生成一段中文分析，确保报告始终可读。
+
+## 6. 沿用原本的 host_app 全流程
+如果你之前是直接运行 `host_app.py`，它依旧可用于“一键跑完”全部步骤：读取组合 → 启动 MCP server → 让 DeepSeek 选择并调用工具 → 自动写入报告。
+
+1. 在终端执行：
+   ```bash
+   python host/host_app.py -s -5% -s 0% -s +5%
+   ```
+   - `-s/--scenario` 参数可重复出现，用于告诉模型希望探索的情景（百分比或绝对价格）。
+2. 根据提示输入你想了解的持仓问题（直接回车则使用默认提示语）。
+3. host_app 会自动：
+   - 启动 `server/mcp_server.py` 并输出可用工具列表；
+   - 调用 DeepSeek 进行两轮对话（第一轮挑工具，第二轮汇总分析）；
+   - 将模型返回的“数据质量提示 + 情景分析 + 投资建议”写入 `reports/portfolio_report.html`。
+4. 运行完成后，直接用浏览器打开 `reports/portfolio_report.html` 即可查看最新报告。若你同时使用 `--analysis-text/--analysis-file` 的 CLI 流程，这两个方式会共享同一份 HTML 文件，随时可以覆盖更新。
+
+因此：
+- **想要完全自动化（由模型来生成建议）** → 继续运行 `python host/host_app.py`。
+- **想手动输入或复用现成的 AI 文本** → 运行 `python host/portfolio_dashboard.py --analysis-text ...`。
+
+你可以按需选择其一，也可以先用 host_app 获得建议后，再将文本保存成文件供 CLI 复现。
