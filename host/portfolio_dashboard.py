@@ -157,7 +157,8 @@ def build_fallback_analysis(metrics: dict, scenario_data: Optional[dict]) -> str
         )
         best = ranked[0]
         worst = ranked[-1]
-        base_totals = (scenario_data or {}).get("base") or {}
+        scenario_base = (scenario_data or {})
+        base_totals = scenario_base.get("base_totals") or scenario_base.get("base") or {}
         base_pnl = base_totals.get("pnl")
 
         def _fmt(item: dict) -> str:
@@ -276,8 +277,17 @@ def build_html(
     ]
     df = metrics["portfolio"]
     updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    quality_notes = (quality_text or "暂无模型提示。").strip()
-    analysis_notes = (analysis_text or "暂无模型分析，请在 host_app 中触发模型调用。").strip()
+    auto_analysis = build_fallback_analysis(metrics, scenario_data)
+
+    def _sanitize(text: Optional[str]) -> str:
+        if not text:
+            return ""
+        cleaned = text.strip()
+        return cleaned
+
+    quality_notes = _sanitize(quality_text) or "暂无模型提示。"
+    provided_analysis = _sanitize(analysis_text)
+    analysis_notes = provided_analysis or auto_analysis or "暂无模型分析，请在 host_app 中触发模型调用。"
     quality_html = "<br />".join(line or "&nbsp;" for line in quality_notes.splitlines())
     analysis_html = "<br />".join(line or "&nbsp;" for line in analysis_notes.splitlines())
 
@@ -517,12 +527,18 @@ def main():
     parser.add_argument("--open", action="store_true", help="生成后在默认浏览器中打开")
     parser.add_argument("--quality-text", help="直接传入数据质量与风险提示内容")
     parser.add_argument("--quality-file", type=Path, help="从文件读取数据质量提示内容")
+    parser.add_argument("--analysis-text", help="直接传入 AI 投资建议内容")
+    parser.add_argument("--analysis-file", type=Path, help="从文件读取 AI 投资建议")
     parser.add_argument("--scenario-file", type=Path, help="从 JSON 文件读取情景模拟结果")
     args = parser.parse_args()
 
     quality_text = args.quality_text
     if quality_text is None and args.quality_file:
         quality_text = args.quality_file.read_text(encoding="utf-8")
+
+    analysis_text = args.analysis_text
+    if analysis_text is None and args.analysis_file and args.analysis_file.exists():
+        analysis_text = args.analysis_file.read_text(encoding="utf-8")
 
     scenario_data: Optional[dict] = None
     if args.scenario_file and args.scenario_file.exists():
@@ -532,6 +548,7 @@ def main():
         output_path=args.output,
         quality_text=quality_text,
         scenario_data=scenario_data,
+        analysis_text=analysis_text,
         open_browser=args.open,
     )
 
