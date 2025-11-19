@@ -203,6 +203,50 @@ def run_fallback_mcp(proc: subprocess.Popen, scenario_specs: List[Dict[str, floa
     return quality_summary, scenario_payload
 
 
+def ensure_report_inputs(
+    proc: subprocess.Popen,
+    scenario_specs: List[Dict[str, float]],
+    quality_summary: Optional[str],
+    scenario_payload: Optional[dict],
+):
+    """确保最终报告至少包含一份质量提示与情景结果。"""
+
+    needs_quality = not quality_summary
+    needs_scenarios = not scenario_payload
+    if not needs_quality and not needs_scenarios:
+        return quality_summary, scenario_payload
+
+    print("\n模型未提供完整的质量/情景数据，自动补齐关键信息…")
+    try:
+        rows, price_map = build_tool_payload()
+    except Exception as exc:
+        print(f"准备组合数据失败：{exc}")
+        return quality_summary, scenario_payload
+
+    if needs_quality:
+        quality_result = call_tool(
+            proc,
+            "analyze_portfolio_quality",
+            {"rows": rows, "price_map": price_map},
+        )
+        quality_payload = quality_result.get("result", quality_result)
+        quality_summary = format_quality_summary(quality_payload)
+
+    if needs_scenarios:
+        adjustments = scenario_specs or [
+            {"label": "-5%", "pct": -0.05, "delta": 0.0},
+            {"label": "+5%", "pct": 0.05, "delta": 0.0},
+        ]
+        scenario_result = call_tool(
+            proc,
+            "simulate_scenarios",
+            {"rows": rows, "price_map": price_map, "adjustments": adjustments},
+        )
+        scenario_payload = scenario_result.get("result", scenario_result)
+
+    return quality_summary, scenario_payload
+
+
 def call_tool(proc: subprocess.Popen, name: str, args: dict) -> dict:
     req = {
         "type": "tool",
@@ -324,6 +368,12 @@ def main():
         final_answer = resp2.choices[0].message.content or ""
         print("\n最终回答：")
         print(final_answer)
+        quality_summary, scenario_payload = ensure_report_inputs(
+            proc,
+            scenario_specs,
+            quality_summary,
+            scenario_payload,
+        )
         quality_text = strip_tool_markup(quality_summary or final_answer)
         final_analysis = strip_tool_markup(final_answer)
         update_report(
